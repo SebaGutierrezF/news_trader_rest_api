@@ -1,0 +1,175 @@
+//@version=6
+strategy("XAUUSD Multi-Timeframe Strategy with News Integration", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Parámetros de entrada
+stopLoss = input.float(title="Stop Loss %", defval=1.0, minval=0.1, step=0.1)
+takeProfit = input.float(title="Take Profit %", defval=2.0, minval=0.1, step=0.1)
+sessionStart = input.string(title="Session Start", defval="0900", tooltip="Formato: HHMM")
+sessionEnd = input.string(title="Session End", defval="1500", tooltip="Formato: HHMM")
+avoidHighImpactNews = input.bool(title="Evitar noticias de alto impacto", defval=true)
+newsSignalThreshold = input.float(title="News Signal Threshold", defval=0.3, minval=0.1, step=0.1)
+
+// Variables para señales de noticias
+var float newsSignal = 0.0
+var string newsTitle = na
+var string newsDescription = na
+var label newsLabel = na
+var table newsTable = table.new(position.middle_right, 3, 3, bgcolor=color.new(color.blue, 90), frame_width=1, frame_color=color.new(color.white, 50))
+
+// Input para señales externas (esto se conectará con tu archivo news_signal.txt)
+externalNewsSignal = input.source(defval=close, title="External News Signal")
+
+// Función para actualizar señales de noticias
+updateNewsSignal() =>
+    // En un entorno real, aquí leerías el archivo news_signal.txt
+    // Por ahora, usamos una simulación basada en el input externo
+    signal = ta.change(externalNewsSignal)
+    desc = signal > 0 ? "Señal alcista detectada" : signal < 0 ? "Señal bajista detectada" : "Sin cambios significativos"
+    [signal, desc]
+
+// Configuración de fecha de inicio
+start_date = timestamp(year(timenow), month(timenow) - 1, dayofmonth(timenow))
+
+// Función para obtener el contexto del mercado basado en múltiples marcos de tiempo
+getMarketContext() =>
+    trend4h = request.security(syminfo.tickerid, "240", ta.ema(close, 200) > ta.ema(close, 50))
+    trend1h = request.security(syminfo.tickerid, "60", ta.ema(close, 200) > ta.ema(close, 50))
+    trend15m = request.security(syminfo.tickerid, "15", ta.ema(close, 200) > ta.ema(close, 50))
+    [trend4h, trend1h, trend15m]
+
+// Función para obtener el perfil de volumen de rango fijo
+getVolumeProfile() =>
+    poc = request.security(syminfo.tickerid, "D", ta.vwap(close))
+    vah = poc + ta.stdev(close, 14)
+    val = poc - ta.stdev(close, 14)
+    [poc, vah, val]
+
+// Función para obtener los niveles de interés basados en pivotes
+getInterestLevels() =>
+    pivotHigh = ta.pivothigh(high, 10, 10)
+    pivotLow = ta.pivotlow(low, 10, 10)
+    [pivotHigh, pivotLow]
+
+// Función para detectar una confirmación débil doble con una vela engulfing
+detectDoubleConfirmationEngulfing(pivotHigh, pivotLow, atr) =>
+    bullishEngulfing = close > open and open <= close[1] and close >= high[1]
+    weakConfirmation = low > low[1] and high > high[1]
+    nearLevel = false
+    if not na(pivotHigh)
+        if math.abs(close - pivotHigh) <= atr * 0.5
+            nearLevel := true
+    if not na(pivotLow)
+        if math.abs(close - pivotLow) <= atr * 0.5
+            nearLevel := true
+    reason = bullishEngulfing ? "Bullish Engulfing" : weakConfirmation ? "Weak Confirmation" : nearLevel ? "Near Level" : "N/A"
+    [bullishEngulfing and weakConfirmation and nearLevel, reason]
+
+// Función para detectar una entrada de retroceso en un Order Block
+detectOBRetracementEntry() =>
+    swingHigh = ta.highest(high, 10)
+    swingLow = ta.lowest(low, 10)
+    ranges = swingHigh - swingLow
+    retracementLevel = swingHigh - (ranges * 0.618)
+    orderBlock = high[1] < low and close > open
+    reason = orderBlock ? "Order Block" : "N/A"
+    [orderBlock and close >= retracementLevel, reason]
+
+// Función para detectar una entrada en expansión
+detectExpansionEntry() =>
+    expansion = (high - low) > (high[1] - low[1]) * 1.5
+    crossover = ta.crossover(close, high[1])
+    reason = expansion ? "Expansion" : crossover ? "Crossover" : "N/A"
+    [expansion and crossover, reason]
+
+// Función para verificar si estamos dentro del horario de trading (New York Time)
+isWithinSession() =>
+    hour = hour(time, "America/New_York")
+    minute = minute(time, "America/New_York")
+    isWithin = hour >= 9 and hour < 15
+    isWithin
+
+// Función para calcular el Stop Loss
+calculateStopLoss(entryPrice) =>
+    entryPrice * (1 - stopLoss / 100)
+
+// Función para calcular el Take Profit
+calculateTakeProfit(entryPrice) =>
+    entryPrice * (1 + takeProfit / 100)
+
+// Actualizar señal de noticias
+[currentNewsSignal, currentNewsDescription] = updateNewsSignal()
+newsSignal := currentNewsSignal
+newsDescription := currentNewsDescription
+
+// Obtener datos del mercado
+[trend4h, trend1h, trend15m] = getMarketContext()
+[poc, vah, val] = getVolumeProfile()
+[pivotHigh, pivotLow] = getInterestLevels()
+atrValue = ta.atr(14)
+
+// Condiciones de entrada
+[model1, reason1] = detectDoubleConfirmationEngulfing(pivotHigh, pivotLow, atrValue)
+[model2, reason2] = detectOBRetracementEntry()
+[model3, reason3] = detectExpansionEntry()
+inTradingHours = isWithinSession()
+bullishContext = trend4h and trend1h
+
+// Integrar señales de noticias con la estrategia técnica
+newsConfirmation = newsSignal > newsSignalThreshold
+entrySignal = (model1 or model2 or model3) and inTradingHours and bullishContext and newsConfirmation and (time >= start_date)
+entryReason = model1 ? reason1 : model2 ? reason2 : reason3
+
+// Ejecución de la estrategia
+if entrySignal
+    entryPrice = close
+    sl = calculateStopLoss(entryPrice)
+    tp = calculateTakeProfit(entryPrice)
+    strategy.entry("Long", strategy.long, comment=entryReason + " + News")
+    strategy.exit("Exit", "Long", stop=sl, limit=tp)
+
+// Cierre forzado a las 3pm (hora de Nueva York)
+if (hour(time, "America/New_York") == 15 and minute(time, "America/New_York") == 0)
+    strategy.close_all("3pm Close")
+
+// Visualización
+plotshape(model1 and inTradingHours and newsConfirmation, title="Entry Signal Model 1", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(model2 and inTradingHours and newsConfirmation, title="Entry Signal Model 2", location=location.belowbar, color=color.blue, style=shape.triangleup, size=size.small)
+plotshape(model3 and inTradingHours and newsConfirmation, title="Entry Signal Model 3", location=location.belowbar, color=color.purple, style=shape.triangleup, size=size.small)
+
+// Visualización de niveles
+plot(poc, title="POC", color=color.red, style=plot.style_line)
+plot(vah, title="VAH", color=color.blue, style=plot.style_line)
+plot(val, title="VAL", color=color.blue, style=plot.style_line)
+
+// Visualización de noticias
+if newsConfirmation
+    if na(newsLabel)
+        newsLabel := label.new(
+            x=bar_index, 
+            y=high, 
+            text="📰", 
+            color=color.yellow,
+            textcolor=color.black,
+            style=label.style_label_down,
+            tooltip=newsDescription
+        )
+    label.set_x(newsLabel, bar_index)
+    label.set_y(newsLabel, high)
+    label.set_tooltip(newsLabel, newsDescription)
+    
+    // Actualizar tabla de noticias
+    table.clear(newsTable, 0, 0, 2, 2)  // Limpiar toda la tabla (3x3)
+    table.cell(newsTable, 0, 0, "📰 Alerta de Noticias", bgcolor=color.new(color.blue, 80), text_color=color.white)
+    table.cell(newsTable, 0, 1, "Señal: " + str.tostring(newsSignal, "#.##"), text_color=color.white)
+    table.cell(newsTable, 0, 2, newsDescription, text_color=color.white)
+
+// Fondo para horario de trading
+bgcolor(inTradingHours ? color.new(color.green, 90) : na)
+bgcolor(newsConfirmation ? color.new(color.yellow, 95) : na)
+
+// Mostrar valores actuales
+var table infoTable = table.new(position.top_right, 2, 4)
+table.cell(infoTable, 0, 0, "News Signal", bgcolor=color.new(color.blue, 90))
+table.cell(infoTable, 1, 0, str.tostring(newsSignal, "#.##"), bgcolor=color.new(color.blue, 90))
+table.cell(infoTable, 0, 1, "Market Context", bgcolor=color.new(color.blue, 90))
+table.cell(infoTable, 1, 1, bullishContext ? "Bullish" : "Bearish", bgcolor=color.new(color.blue, 90))
